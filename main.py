@@ -349,6 +349,14 @@ audio_file_list = [WAVE_OUTPUT_FILENAME, 'audio_transcript_output.wav']
 # Prepare voice output directories.
 for agent in agent_config:
     output_dir = agent["output_dir"]
+
+    # Create output directory if it doesn't exist
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+        print(f"Created directory: {output_dir}")
+    else:
+        print(f"Directory already exists: {output_dir}")
+        
     for file in os.listdir(output_dir):
         file_path = os.path.join(output_dir, file)
         if os.path.isfile(file_path):
@@ -453,21 +461,3 @@ while True:
     else:
         print("Dialogue in progress...")
         continue
-                
-    
-
-        
-
-    
-
-
-
-
-
-
-
-
-
-
-
-

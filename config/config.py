@@ -9,6 +9,7 @@ import simpleaudio as sa
 import subprocess
 import threading
 import base64
+import traceback
 import pyautogui as pygi
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
@@ -20,6 +21,11 @@ import time
 from bs4 import BeautifulSoup
 import soundfile as sf
 from datetime import datetime
+
+# MAIN_MODEL = "llama3.1:8b-instruct-fp16"
+MAIN_MODEL = "lmstudio-community/Meta-Llama-3.1-8B-Instruct-GGUF/Meta-Llama-3.1-8B-Instruct-Q8_0.gguf"
+#MAIN_URL = "http://localhost:11434/api/chat"
+MAIN_URL = "http://localhost:1234/v1/chat/completions"
 
 # Get the directory that contains config.py
 config_dir = os.path.dirname(os.path.realpath(__file__))
@@ -50,7 +56,7 @@ class Agent():
         self.dialogue_list = dialogue_list
 
     def summarize_conversation(self, agent_messages):
-        url = "http://localhost:11434/api/chat"
+        url = MAIN_URL
         headers = {
             "Content-Type": "application/json"
         }
@@ -58,7 +64,7 @@ class Agent():
         summary_prompt = "Provide an expository summary of this conversation in list format, highlighting the most significant events that occurred while being as objective as possible:\n\n" + "\n".join(agent_messages[-32000:])
 
         summary_payload = {
-            "model": "llama3.1:8b-instruct-fp16",
+            "model": MAIN_MODEL,
             "messages": [{"role": "system", "content": "Summarize the conversation in list format."}, {"role": "user", "content": summary_prompt}],
             "stream": False,
             "options": {
@@ -71,7 +77,8 @@ class Agent():
 
         if response.status_code == 200:
             response_data = response.json()
-            text_response = response_data.get("message", {}).get("content", "No response received")
+            text_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "No response received")
+            # text_response = response_data.get("message", {}).get("content", "No response received")
             agent_messages.append(text_response)
             return agent_messages, text_response
         else:
@@ -84,7 +91,7 @@ class Agent():
         global image_lock
 
         # Define the endpoint and headers
-        url = "http://localhost:11434/api/chat"
+        url = MAIN_URL
         headers = {
             "Content-Type": "application/json"
         }
@@ -104,7 +111,7 @@ class Agent():
 
         # Define the payload
         payload = {
-            "model": "llama3.1:8b-instruct-fp16",
+            "model": MAIN_MODEL,
             "messages": messages,
             "stream": False,
             "options":{
@@ -124,7 +131,8 @@ class Agent():
         if response.status_code == 200:
             response_data = response.json()
             # Extract the assistant's message content
-            text_response = response_data.get("message", {}).get("content", "No response received")
+            text_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "No response received")
+            # text_response = response_data.get("message", {}).get("content", "No response received")
             # Remove all quotation marks
             text_response = re.sub(r'"', '', text_response)
             # Remove unwanted characters
@@ -155,7 +163,7 @@ class VectorAgent():
     def generate_text(self, agent_name, agent_messages, agent_traits, screenshot_description, audio_transcript_output):
 
         # Define the endpoint and headers
-        url = "http://localhost:11434/api/chat"
+        url = MAIN_URL
         headers = {
             "Content-Type": "application/json"
         }
@@ -184,7 +192,7 @@ class VectorAgent():
 
         # Define the payload
         payload = {
-            "model": "llama3.1:8b-instruct-fp16",
+            "model": MAIN_MODEL,
             "messages": agent_messages,
             "stream": False,
             "options":{
@@ -205,7 +213,8 @@ class VectorAgent():
         if response.status_code == 200:
             response_data = response.json()
             # Extract the assistant's message content
-            text_response = response_data.get("message", {}).get("content", "No response received")
+            text_response = response_data.get("choices", [{}])[0].get("message", {}).get("content", "No response received")
+            # text_response = response_data.get("message", {}).get("content", "No response received")
             if text_response.startswith('"') and text_response.endswith('"'):
                 text_response = text_response[1:-2]
             # Remove unwanted characters
@@ -412,6 +421,7 @@ def record_audio(audio, WAVE_OUTPUT_FILENAME, FORMAT, RATE, CHANNELS, CHUNK, REC
                     if ii % (int(RATE / CHUNK) * 10) * 10 == 0:
                         print("CHECKPOINT------------------------",ii)
                         image_picture = pygi.screenshot("axiom_screenshot.png")
+                        print("Screenshot should have been written to axiom_screenshot.png")
                         if not image_lock:
                             threading.Thread(target=view_image, args=(vision_model, processor)).start()
 
@@ -459,6 +469,8 @@ def record_audio(audio, WAVE_OUTPUT_FILENAME, FORMAT, RATE, CHANNELS, CHUNK, REC
 
     except Exception as e:
         print(f"An error occurred in record_audio: {e}")
+
+        traceback.print_exc() 
         return None
 
 def record_audio_output(audio, WAVE_OUTPUT_FILENAME, FORMAT, CHANNELS, RATE, CHUNK, RECORD_SECONDS, file_index_count):
@@ -481,7 +493,12 @@ def record_audio_output(audio, WAVE_OUTPUT_FILENAME, FORMAT, CHANNELS, RATE, CHU
         device_index = None
         for i in range(p.get_device_count()):
             device_info = p.get_device_info_by_index(i)
-            if 'VB-Audio' in device_info['name']:  # Look for 'VB-Audio' instead of 'VB-Cable'
+            # if 'VB-Audio' in device_info['name']:  # Look for 'VB-Audio' instead of 'VB-Cable'
+            #     device_index = i
+            #     break
+
+            host_api_info = p.get_host_api_info_by_index(device_info['hostApi'])
+            if 'Stereomix' in device_info['name'] and host_api_info['name'] == 'MME':
                 device_index = i
                 break
 
