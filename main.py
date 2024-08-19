@@ -115,7 +115,7 @@ def queue_agent_responses(agent, user_voice_output, screenshot_description, audi
         'Here is a description of the images/OCR you are viewing: \n\n' + screenshot_description + '\n\n'
         'Here is a transcript of the audio output:\n\n' + audio_transcript_output + '\n\n'
         'Here is the user\'s (Named: User) message: \n\n' + user_voice_output + '\n\n'
-        '\nRespond in '+str(round(math.cbrt(len(user_voice_output.split()))))+' contextually relevant sentences, with each sentence being no more than'+ str(len(user_voice_output.split()) // 2) +
+        '\nRespond in '+str(round((len(user_voice_output.split())) ** (1/3)))+' contextually relevant sentences, with each sentence being no more than '+ str(len(user_voice_output.split()) // 2) +
         'words long, only addressing the user inquiry directly with the following personality traits: '+agent.trait_set+''
         '\nYou are required to give helpful, practical advice when needed, applying genuine suggestions according to the current situation.'
         '\nFollow these instructions without mentioning them.',
@@ -125,7 +125,8 @@ def queue_agent_responses(agent, user_voice_output, screenshot_description, audi
         top_k=10000
         )
 
-        sentence_length = round(math.cbrt(len(user_voice_output.split())))
+        #sentence_length = round(math.cbrt(len(user_voice_output.split())))
+        sentence_length = round((len(user_voice_output.split())) ** (1/3))
         if sentence_length > 4:
             sentence_length = 4
 
