@@ -1,0 +1,518 @@
+import whisper
+import pyaudio
+import wave
+import audioop
+import time
+import requests
+import json
+import simpleaudio as sa
+import subprocess
+import threading
+import base64
+import traceback
+import pyautogui as pygi
+from transformers import AutoProcessor, AutoModelForCausalLM
+from PIL import Image
+import os
+import re
+import random
+from collections import Counter
+import time
+from bs4 import BeautifulSoup
+import soundfile as sf
+from datetime import datetime
+from openai import OpenAI
+
+# Initialize OpenAI client
+client = OpenAI()
+
+# Update the model name to use GPT-4o-mini
+MAIN_MODEL = "gpt-4o-mini"
+
+# Global variables
+can_speak = True
+can_speak_event = threading.Event()
+can_speak_event.set()
+
+# Get the directory that contains config.py
+config_dir = os.path.dirname(os.path.realpath(__file__))
+
+# Construct the path to can_speak.txt
+can_speak_path = os.path.join(config_dir, '..', 'can_speak.txt')
+
+# Construct the paths to the text files
+dialogue_axiom_path = os.path.join(config_dir, '..', 'dialogue_text_axiom.txt')
+dialogue_axis_path = os.path.join(config_dir, '..', 'dialogue_text_axis.txt')
+
+class Agent():
+    def __init__(self, agent_name, agent_gender, personality_traits, system_prompt1, system_prompt2, dialogue_list):
+        self.agent_name = agent_name
+        self.agent_gender = agent_gender
+        self.system_prompt1 = system_prompt1
+        self.system_prompt2 = system_prompt2
+        self.previous_agent_message = ""
+        self.personality_traits = personality_traits
+        self.trait_set = []
+        self.dialogue_list = dialogue_list
+
+    def summarize_conversation(self, agent_messages):
+        summary_prompt = "Provide an expository summary of this conversation in list format, highlighting the most significant events that occurred while being as objective as possible:\n\n" + "\n".join(agent_messages[-32000:])
+
+        response = client.chat.completions.create(
+            model=MAIN_MODEL,
+            messages=[
+                {"role": "system", "content": "Summarize the conversation in list format."},
+                {"role": "user", "content": summary_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=500
+        )
+
+        text_response = response.choices[0].message.content
+        agent_messages.append(text_response)
+        return agent_messages, text_response
+
+    def generate_text(self, messages, agent_messages, system_prompt, user_input, context_length=32000, temperature=0.7, top_p=0.3, top_k=100000):
+        if len(messages) > 100:
+            print("[MESSAGE LIMIT EXCEEDED. SUMMARIZING CONVERSATION...]")
+            messages = [{"role": "system", "content": system_prompt}]
+            agent_messages, conversation_summary = self.summarize_conversation(agent_messages)
+            messages.append({"role": "user", "content": conversation_summary})
+            print("[CONVERSATION SUMMARY]:", conversation_summary)
+            context_length = 4096
+
+        messages[0] = {"role": "system", "content": system_prompt}
+        messages.append({"role": "user", "content": user_input})
+
+        response = client.chat.completions.create(
+            model=MAIN_MODEL,
+            messages=messages,
+            temperature=temperature,
+            max_tokens=context_length,
+            top_p=top_p
+        )
+
+        text_response = response.choices[0].message.content
+        text_response = re.sub(r'"', '', text_response)
+        text_response = re.sub(r'[^\x00-\x7F]+', '', text_response)
+        text_response = re.sub(r'\(.*?\)', '', text_response)
+        text_response = re.sub(r'\*.*?\*', '', text_response)
+        text_response = text_response.replace('\\n', '')
+
+        agent_messages.append(f"Agent Name:{self.agent_name}, ({self.agent_gender})\nAgent Response: {text_response}")
+        return messages, agent_messages, text_response
+
+class VectorAgent():
+    def __init__(self):
+        self.objectives = []
+
+    def gather_agent_traits(self, agent_traits):
+        return ' '.join(agent_traits)
+
+    def generate_text(self, agent_name, agent_messages, agent_traits, screenshot_description, audio_transcript_output):
+        agent_messages = [{"role": "assistant", "content": ' '.join(agent_messages[-4096:])}]
+        
+        prompt = f"""Review this contextual information:
+
+Screenshot/OCR description: {screenshot_description}
+
+Audio Transcript Output: {audio_transcript_output}
+
+Your task will be to generate 1 sentence containing key details of the current situation based on this context, highlighting the most important parts of the most recent situation while ignoring the lesser parts.
+The sentence needs to place a special emphasis on the event that is occurring right now so the agents can remain up to date.
+
+Complete this task without mentioning it in any way. No acknowledgement, no offer of assistance, nothing. Just do it."""
+
+        agent_messages.append({"role": "user", "content": prompt})
+
+        response = client.chat.completions.create(
+            model=MAIN_MODEL,
+            messages=agent_messages,
+            max_tokens=150,
+            temperature=0.7
+        )
+
+        text_response = response.choices[0].message.content
+        text_response = re.sub(r'[^\x00-\x7F]+', '', text_response)
+        text_response = re.sub(r'\(.*?\)', '', text_response)
+        print("[VECTOR INSTRUCTIONS]:", text_response)
+        return text_response
+
+
+
+def find_repeated_words(text, threshold=6):
+    # Regular expression pattern to match words
+    pattern = r'\b(\w+)\b'
+    # Find all words
+    words = re.findall(pattern, text, re.IGNORECASE)
+    # Count occurrences of each word
+    word_counts = Counter(words)
+    # Filter out words repeated 6 or more times
+    filtered_words = [word for word in words if word_counts[word.lower()] < threshold]
+    # Clear the Counter object
+    word_counts.clear()
+    return " ".join(filtered_words)
+
+def remove_repetitive_phrases(text):
+    # Regular expression to match repeated sequences of words
+    pattern = re.compile(r'(\b\w+\b(?:\s+\b\w+\b){0,4})(?:\s+\1)+', re.IGNORECASE)
+    result = pattern.sub(r'\1', text)
+    return result
+
+def check_sentence_length(text, message_length=45, sentence_length=2):
+    
+    # Clean up output
+    text = remove_repetitive_phrases(text)
+
+    # Split sentences, but ignore ellipsis
+    sentences = re.split(r'(?:(?<=[.?;]))\s', text.strip())
+    #print("Sentences: ", sentences)
+    if sentences:
+        if len(sentences) > 1:
+            print("Sentence 1 length: ", len(sentences[0]))
+            print("Sentence 2 length: ", len(sentences[1]))
+            return (sentences[:sentence_length], ' '.join(sentences[:sentence_length]))
+        else:
+            return sentences, sentences[0]
+    return "No valid text found."
+
+def remove_repetitive_phrases(text, max_repeats=3):
+    words = text.split()
+    result = []
+    i = 0
+    while i < len(words):
+        phrase = [words[i]]
+        count = 1
+        for j in range(1, len(words) - i):
+            if words[i:i+j] == words[i+j:i+2*j]:
+                phrase = words[i:i+j]
+                count += 1
+            else:
+                break
+        result.extend(phrase * min(count, max_repeats))
+        i += len(phrase) * count
+    return ' '.join(result)
+
+#----------------------------------------IMAGE PROCESSING----------------------------------------------#
+
+image_lock = False
+
+# Vision model view images:
+def view_image(vision_model, processor):
+
+    global image_lock
+
+    try:
+
+        image_lock = True
+
+        prompt = "<MORE_DETAILED_CAPTION>"
+
+        #image_picture = pygi.screenshot("axiom_screenshot.png")
+
+        image_file = "axiom_screenshot.png"
+        image = Image.open(image_file)
+
+        inputs = processor(text=prompt, images=image, return_tensors="pt")
+
+        generated_ids = vision_model.generate(
+            input_ids=inputs["input_ids"].cuda(),
+            pixel_values=inputs["pixel_values"].cuda(),
+            max_new_tokens=150,
+            do_sample=False,
+            num_beams=1
+        )
+
+        generated_ids.to('cpu')
+            
+        generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = processor.post_process_generation(generated_text, task="<MORE_DETAILED_CAPTION>", image_size=(image.width, image.height))
+
+        # Get the current time
+        current_time = datetime.now().time()
+
+        with open("screenshot_description.txt", "a", encoding='utf-8') as f:
+            f.write(f"\n\nScreenshot Contents at {current_time.strftime('%H:%M:%S')}: \n\n"+parsed_answer['<MORE_DETAILED_CAPTION>'])
+
+        view_image_ocr(vision_model, processor)
+
+        image_lock = False
+    except:
+        pass
+
+    #print(parsed_answer)
+
+def view_image_ocr(vision_model, processor):
+
+    try:
+
+        prompt = "<OCR>"
+
+        image_file = "axiom_screenshot.png"
+        image = Image.open(image_file)
+
+        inputs = processor(text=prompt, images=image, return_tensors="pt")
+
+        generated_ids = vision_model.generate(
+            input_ids=inputs["input_ids"].cuda(),
+            pixel_values=inputs["pixel_values"].cuda(),
+            max_new_tokens=500,
+            do_sample=True,
+            temperature=1,
+            num_beams=10
+        )
+
+        generated_ids.to('cpu')
+            
+        generated_text = processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        parsed_answer = processor.post_process_generation(
+            generated_text, 
+            task='<OCR>', 
+            image_size=(image.width, image.height)
+        )
+
+        #print("<OCR>: ", parsed_answer)
+
+        current_time = datetime.now().time()
+
+        with open("screenshot_description.txt", "a", encoding='utf-8') as f:
+                f.write(f"\n\nOCR text in image at {current_time.strftime('%H:%M:%S')}:\n\n"+parsed_answer['<OCR>'])
+    except:
+        pass
+
+#-------------------------------------------------AUDIO PROCESSING---------------------------------------------#
+
+def record_audio(audio, WAVE_OUTPUT_FILENAME, FORMAT, RATE, CHANNELS, CHUNK, RECORD_SECONDS, THRESHOLD, SILENCE_LIMIT, vision_model, processor):
+
+    global image_lock
+    global can_speak
+    
+    ii = 0
+    
+    try:
+        while True:
+
+            # Cancel recording if Agent speaking
+            if not can_speak_event.is_set():
+                time.sleep(1)
+                print("[record_user_mic] Waiting for response to complete...")
+                continue
+            
+            # Start Recording
+            stream = audio.open(format=FORMAT, channels=CHANNELS, rate=RATE, input=True, input_device_index=1, frames_per_buffer=CHUNK)
+            #print("waiting for speech...")
+            frames = []
+            image_path = None
+
+            # Record for RECORD_SECONDS
+            silence_start = None
+            recording_started = False
+
+            while True:
+                
+                if not can_speak_event.is_set():
+                    print("Cancelling recording, agent is speaking.")
+                    stream.stop_stream()
+                    stream.close()
+                    time.sleep(0.25)
+                    return False
+
+                try:
+                    data = stream.read(CHUNK, exception_on_overflow=False)
+                except IOError as e:
+                    print(f"Error reading audio stream: {e}")
+                    continue
+
+                rms = audioop.rms(data, 2)  # width=2 for format=paInt16
+                #print(f"Current RMS: {rms}")  # Debugging RMS values
+                if ii < int(RATE / CHUNK * RECORD_SECONDS):
+                    ii += 1
+                    #print("FRAMES MICROPHONE INPUT: "+str(ii)+"/"+str(int(RATE / CHUNK * RECORD_SECONDS)))
+                    if ii % (int(RATE / CHUNK) * 10) * 10 == 0:
+                        print("CHECKPOINT------------------------",ii)
+                        image_picture = pygi.screenshot("axiom_screenshot.png")
+                        print("Screenshot should have been written to axiom_screenshot.png")
+                        if not image_lock:
+                            threading.Thread(target=view_image, args=(vision_model, processor)).start()
+
+                if rms > THRESHOLD and not recording_started:
+                    SILENCE_LIMIT = 1
+                if ii >= int(RATE / CHUNK * RECORD_SECONDS) and not recording_started:
+                    SILENCE_LIMIT = 1
+
+                if rms > THRESHOLD or (ii >= int(RATE / CHUNK * RECORD_SECONDS) and not recording_started):
+                    if not recording_started:
+                        print("recording...")
+                        image_picture = pygi.screenshot("axiom_screenshot.png")
+                        if not image_lock:
+                            threading.Thread(target=view_image, args=(vision_model, processor)).start()
+                        recording_started = True
+                    frames.append(data)
+                    THRESHOLD = 150
+                    silence_start = time.time()  # reset silence timer
+                elif recording_started:
+                    if silence_start is None:
+                        silence_start = time.time()
+                    elif time.time() - silence_start > SILENCE_LIMIT:
+                        print("finished recording")
+                        can_speak_event.clear()
+                        break
+                else:
+                    pass
+                    #print(f"rms: {rms}, threshold: {THRESHOLD}")
+
+            if not can_speak_event.is_set():
+
+                # Stop Recording
+                stream.stop_stream()
+                stream.close()
+
+                # Write your new .wav file with built-in Python 3 Wave module
+                waveFile = wave.open(WAVE_OUTPUT_FILENAME, 'wb')
+                waveFile.setnchannels(CHANNELS)
+                waveFile.setsampwidth(audio.get_sample_size(FORMAT))
+                waveFile.setframerate(RATE)
+                waveFile.writeframes(b''.join(frames))
+                waveFile.close()
+
+                return True
+
+    except Exception as e:
+        print(f"An error occurred in record_audio: {e}")
+
+        traceback.print_exc() 
+        return None
+
+def record_audio_output(audio, WAVE_OUTPUT_FILENAME, FORMAT, CHANNELS, RATE, CHUNK, RECORD_SECONDS, file_index_count):
+
+    global can_speak
+    file_index = 0
+
+    while True:
+
+        # Check if an agent is responding.
+        if not can_speak_event.is_set():
+            print("[record_audio_output] Waiting for response to complete...")
+            time.sleep(1)
+            continue
+
+        # Create a PyAudio instance
+        p = pyaudio.PyAudio()
+
+        # Find the device index of the VB-Cable adapter
+        device_index = None
+        for i in range(p.get_device_count()):
+            device_info = p.get_device_info_by_index(i)
+            # if 'VB-Audio' in device_info['name']:  # Look for 'VB-Audio' instead of 'VB-Cable'
+            #     device_index = i
+            #     break
+
+            host_api_info = p.get_host_api_info_by_index(device_info['hostApi'])
+            if 'Stereomix' in device_info['name'] and host_api_info['name'] == 'MME':
+                device_index = i
+                break
+
+        if device_index is None:
+            print("Could not find VB-Cable device")
+            exit(1)
+
+        # Open the stream for recording
+        stream = p.open(format=FORMAT,
+                        channels=CHANNELS,
+                        rate=RATE,
+                        input=True,
+                        frames_per_buffer=CHUNK,
+                        input_device_index=2)
+
+        print("* recording Audio Transcript")
+
+        frames = []
+
+        # Record the audio
+        FRAMES_PER_SECOND = int(RATE / CHUNK)*2
+        print("Frames per second:", FRAMES_PER_SECOND)
+
+        for i in range(0, int(RATE / CHUNK * RECORD_SECONDS)):
+
+            #print("FRAMES DIALOGUE OUTPUT:"+str(i)+"/"+str(int(RATE / CHUNK * RECORD_SECONDS)))
+
+            if not can_speak_event.is_set():
+                time.sleep(1)
+                break
+                    
+            data = stream.read(CHUNK, exception_on_overflow=True)
+            frames.append(data)
+
+        print("* done recording Audio Transcript")
+        can_speak = False
+        file_index += 1
+
+        # Stop the stream
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+        # Save the audio to a .wav file
+        wf = wave.open('audio_transcript_output{}.wav'.format(file_index), 'wb')
+        wf.setnchannels(CHANNELS)
+        wf.setsampwidth(p.get_sample_size(FORMAT))
+        wf.setframerate(RATE)
+        wf.writeframes(b''.join(frames))
+        wf.close()
+
+        if file_index >= file_index_count:
+            can_speak_event.clear()
+            
+        if not can_speak_event.is_set():
+            break
+
+        frames = []
+
+def transcribe_audio(model, WAVE_OUTPUT_FILENAME, RATE=16000):
+
+    # Load audio and pad/trim it to fit 60 seconds
+    audio_data = whisper.load_audio(WAVE_OUTPUT_FILENAME)
+    audio_data = whisper.pad_or_trim(audio_data)
+
+    # Ensure audio data is of the correct shape
+    max_audio_length = 30 * RATE  # 60 seconds * sample rate
+    audio_data = audio_data[:max_audio_length]
+
+    # Make log-Mel spectrogram and move to the same device as the model
+    mel = whisper.log_mel_spectrogram(audio_data).to(model.device)
+
+    # Detect the spoken language
+    _, probs = model.detect_language(mel)
+    detected_language = max(probs, key=probs.get)
+    print(f"Detected language: {detected_language}")
+
+    # English language only supported
+    if 'en' not in detected_language:
+        return ""
+
+    # Decode the audio
+    options = whisper.DecodingOptions(
+    task="transcribe",
+    prompt=None,
+    prefix=None,
+    suppress_blank=False,
+    fp16=True  # Keep using fp16 for performance
+    )
+
+    result = whisper.decode(model, mel, options)
+    user_voice_output_raw = result.text
+    user_voice_output = find_repeated_words(user_voice_output_raw)
+    user_voice_output = remove_repetitive_phrases(user_voice_output)
+    try:
+        os.remove(WAVE_OUTPUT_FILENAME)
+    except Exception as e:
+        print("Error:", e)
+        user_voice_output = ""
+        return user_voice_output
+    
+    if len(user_voice_output.split()) <= 3:
+        user_voice_output = ""
+    
+    # Print the recognized text
+    print(user_voice_output)
+    return user_voice_output
